@@ -1,0 +1,209 @@
+using System;
+using Npgsql;
+using System.Data;
+using System.Data.SqlClient;
+using System.Collections.Generic;
+using System.ComponentModel;
+using Microsoft.Data.SqlClient;
+using NpgsqlTypes;
+using System.Linq;
+
+namespace SqlServerToPostgreSQL
+{
+    class Program
+    {
+       public static Dictionary<long, long> idMap = new Dictionary<long, long>();
+
+        static void Main(string[] args)
+        {
+            // Define the SQL Server and PostgreSQL connection strings
+            string sqlServerConnectionString = "Data Source=profile-builder-demo-database.cqudqfsnwzu5.eu-west-2.rds.amazonaws.com;Initial Catalog=PEPProfilerDB;User ID=dab_readonly;Password=dab1234#;Encrypt=false;Timeout=1600;";
+            string postgreSqlConnectionstring = "Server=profilebuilder-v1-stage-db.cvwpjekkgsqh.ap-southeast-1.rds.amazonaws.com;Port=5432;Database=profilebuilder;User Id=pb_prod_admin;Password=siy8kar5HoxOJYI9z3ov;CommandTimeout=1600;";
+
+            // Define the table names, primary keys, and their foreign key relationships
+            Dictionary<string, string[]> tableRelationships = new Dictionary<string, string[]>
+{
+{ "pepallocation", new string[] { "Id"} },
+{ "pepallocationdata", new string[] {"pepallocationid" } }
+};
+
+            // Loop through each table and migrate the data
+            foreach (KeyValuePair<string, string[]> tableRelationship in tableRelationships)
+            {
+                string tableName = tableRelationship.Key;
+                string[] primaryKeys = tableRelationship.Value;
+
+                Console.WriteLine($"Migrating data from {tableName}");
+
+                DataTable dataTable = GetDataFromSqlServer(sqlServerConnectionString, tableName);
+               
+              
+                MigrateDataToPostgreSQL(postgreSqlConnectionstring, tableName, primaryKeys, dataTable,sqlServerConnectionString);
+
+                Console.WriteLine($"Data migration complete for {tableName}");
+            }
+
+            Console.WriteLine("Press any key to exit...");
+            Console.ReadKey();
+        }
+
+        
+
+
+
+
+        private static DataTable GetDataFromSqlServer(string sqlConnectionString, string tableName)
+        {
+            using (SqlConnection connection = new SqlConnection(sqlConnectionString))
+            {
+                connection.Open();
+                string query;
+                if(tableName=="pepallocation")
+                     query = $"SELECT * FROM dbo.{tableName} where id=6852";
+                else
+                     query = $"SELECT * FROM dbo.{tableName} where pepallocationid=6852";
+
+                using (SqlCommand command = new SqlCommand(query, connection))
+                {
+                    using (SqlDataAdapter adapter = new SqlDataAdapter(command))
+                    {
+                        DataTable dataTable = new DataTable();
+                        adapter.Fill(dataTable);
+                       // Console.WriteLine("data fetched"+dataTable);
+                        Console.WriteLine("Data Fetched:");
+                        //for (int i = 0; i < dataTable.Rows.Count; i++)
+                        //{
+                        //    for (int j = 0; j < dataTable.Columns.Count; j++)
+                        //    {
+                        //        Console.Write(dataTable.Rows[i][j]);
+                        //    }
+                        //    Console.WriteLine();
+                        //}
+                        return dataTable;
+
+                    }
+                }
+
+
+
+               
+
+
+
+
+            }
+        }
+
+
+        private static long ComputeMappedValue(long pepallocationId, Dictionary<long, long> idMap)
+        {
+            var highestValue = idMap.Values.DefaultIfEmpty(0).Max();
+            var mappedValue = highestValue + 1;
+            return mappedValue;
+        }
+
+
+        private static void MigrateDataToPostgreSQL(string postgreSqlConnectionstring, string tableName, string[] primaryKeys, DataTable dataTable,string sqlServerConnectionString)
+        {
+            // Create a connection to the Postgres database
+
+            using (var connection = new NpgsqlConnection(postgreSqlConnectionstring))
+            {
+                connection.Open();
+                using ( SqlConnection    connection2 = new SqlConnection(sqlServerConnectionString))
+                {
+                    connection2.Open();
+
+                    var insertSql = "";
+                    if (tableName == "pepallocationdata")
+                    {
+                        foreach (DataRow row in dataTable.Rows)
+                        {
+
+                            var columns = string.Join(", ", dataTable.Columns.Cast<DataColumn>().Where(c => !primaryKeys.Contains(c.ColumnName) && c.ColumnName != "Id").Select(c => c.ColumnName));
+
+                            var values = string.Join(",", row.ItemArray.Where((v, i) => dataTable.Columns[i].ColumnName != "Id").Select(v => v is DateTime ? $"'{((DateTime)v).ToString("yyyy-MM-dd HH:mm:ss")}'" : v == null || v == DBNull.Value ? "null" : $"'{v.ToString().Replace("'", "''")}'"));
+
+                            // Replace the value of "pepallocationid" with "idMap[pepallocationid]" with the datatype "long"
+                            var pepAllocationId = row["pepallocationid"];
+                            if (pepAllocationId != null && pepAllocationId != DBNull.Value)
+                            {
+                                long pepAllocationIdValue = Convert.ToInt64(pepAllocationId);
+                                values = values.Replace(pepAllocationId.ToString(), idMap[pepAllocationIdValue].ToString());
+                            }
+
+                            insertSql = $"INSERT INTO {tableName} ({columns}) VALUES ({values}) ";
+
+                        }
+
+                        using (var command = new NpgsqlCommand(insertSql, connection))
+                        {
+                            command.ExecuteNonQuery();
+                        }
+                        Console.WriteLine("insertsql");
+                    }
+                    else
+                    {
+
+
+
+                        // Loop through the rows of the DataTable and insert or update each row
+                        foreach (DataRow row in dataTable.Rows)
+                        {
+                        
+                            var columns = string.Join(", ", dataTable.Columns.Cast<DataColumn>().Where(c => !primaryKeys.Contains(c.ColumnName) && c.ColumnName != "Id").Select(c => c.ColumnName));
+
+                            var values = string.Join(",", row.ItemArray.Where((v, i) => dataTable.Columns[i].ColumnName != "Id").Select(v => v is DateTime ? $"'{((DateTime)v).ToString("yyyy-MM-dd HH:mm:ss")}'" : v == null || v == DBNull.Value ? "null" : $"'{v.ToString().Replace("'", "''")}'"));
+
+
+                            insertSql = $"INSERT INTO {tableName} ({columns}) VALUES ({values}) " + $"ON CONFLICT ({string.Join(", ", primaryKeys)}) DO UPDATE SET " + $"{string.Join(", ", dataTable.Columns.Cast<DataColumn>().Where(c => !primaryKeys.Contains(c.ColumnName)).Select(c => $"{c.ColumnName} = EXCLUDED.{c.ColumnName}"))} RETURNING id;";
+
+
+                            // assume you have a DataTable named "myTable" with columns "id", "name", and "age"
+
+                            // get the index of the "name" column
+                            // assume you have a DataTable named "myTable" with columns "id", "name", and "age"
+
+                            // get the index of the "name" column
+                            int nameColumnIndex = dataTable.Columns.IndexOf("id");
+
+                            // loop through the rows in the DataTable
+                            
+                                // get the value of the "name" column for the current row
+                                int nameValue =Convert.ToInt32(row[nameColumnIndex]);
+
+                                // do something with the value
+                                Console.WriteLine("Name value: " + nameValue);
+
+
+
+                             var insertedId=0;
+                            using (var command = new NpgsqlCommand(insertSql, connection))
+                            {
+
+                                 insertedId = Convert.ToInt32(command.ExecuteScalar());
+                                Console.WriteLine($"The ID of the newly inserted row is {insertedId}");
+                                //   command.ExecuteNonQuery();
+                            }
+                            idMap.Add(nameValue, insertedId);
+
+
+                        }
+                        foreach (KeyValuePair<long, long> kvp in idMap)
+                        {
+                            Console.WriteLine("Key: {0}, Value: {1}", kvp.Key, kvp.Value);
+                        }
+                        // Create a command object and execute the INSERT statement
+
+                    }
+                    connection2.Close();
+                }
+                // Close the connection to the Postgres database
+                connection.Close();
+            }
+        }    
+    }
+}
+        
+
+
